@@ -1,32 +1,36 @@
 import cv2
 import numpy as np
+from ultralytics import YOLO
+from shapely.geometry import Polygon, Point
+import tkinter as tk
+from tkinter import filedialog
+import os
+import glob
+import math
 import matplotlib.pyplot as plt
 
-# Load YOLO model
-net = cv2.dnn.readNet("yolov3.weights", "yolov3.cfg")
-layer_names = net.getLayerNames()
-output_layers = [layer_names[i - 1] for i in net.getUnconnectedOutLayers()]
+global apparent_width
+global speed
+global actual_pixel
 
-# Load class labels
-with open("coco.names", "r") as f:
-    classes = [line.strip() for line in f.readlines()]
+model = YOLO("yolov8n.pt")
 
-# Define vehicle classes
+speed = 4  # m/s
+focal_length = 500  # Example value, replace with actual focal length
+real_car_width = 1.4  # Width of a car in meters
+actual_pixel = 310
+
+# Define the vehicle classes
 vehicle_classes = ["car", "truck", "bus", "motorbike", "bicycle"]
-
-# Define focal length (in pixels) and real-world width of a car (in meters)
-focal_length = 700  # Example value, replace with actual focal length
-real_car_width = 1.8  # Average width of a car in meters
 
 # Function to detect vehicles in an image
 def detect_vehicles(image_path):
     img = cv2.imread(image_path)
+    img = cv2.resize(img, (640, 640))
     height, width, _ = img.shape
 
-    # Prepare the image for YOLO model
-    blob = cv2.dnn.blobFromImage(img, 0.00392, (416, 416), (0, 0, 0), True, crop=False)
-    net.setInput(blob)
-    outs = net.forward(output_layers)
+    # Run YOLOv8 model
+    results = model(img, device='cpu')
 
     # Initialize lists for detected bounding boxes, confidences, class IDs, and distances
     boxes = []
@@ -35,22 +39,17 @@ def detect_vehicles(image_path):
     distances = []
 
     # Extract information from the detections
-    for out in outs:
-        for detection in out:
-            scores = detection[5:]
-            class_id = np.argmax(scores)
-            confidence = scores[class_id]
-            if confidence > 0.5 and classes[class_id] in vehicle_classes:
-                # Get the bounding box coordinates and dimensions
-                center_x = int(detection[0] * width)
-                center_y = int(detection[1] * height)
-                w = int(detection[2] * width)
-                h = int(detection[3] * height)
-                x = int(center_x - w / 2)
-                y = int(center_y - h / 2)
+    for result in results:
+        for bbox in result.boxes:
+            x, y, w, h = map(int, bbox.xywh[0])  # Convert to integers
+            confidence = float(bbox.conf[0])  # Convert to float
+            class_id = int(bbox.cls[0])  # Convert to integer
+
+            if confidence > 0.65:
                 boxes.append([x, y, w, h])
-                confidences.append(float(confidence))
+                confidences.append(confidence)
                 class_ids.append(class_id)
+
                 # Calculate distance
                 distance = (real_car_width * focal_length) / w
                 distances.append(distance)
@@ -59,11 +58,10 @@ def detect_vehicles(image_path):
     indexes = cv2.dnn.NMSBoxes(boxes, confidences, 0.5, 0.4)
 
     detected_vehicles = []
-    for i in range(len(boxes)):
-        if i in indexes:
-            x, y, w, h = boxes[i]
-            detected_vehicles.append((x, y, w, h, distances[i]))
-
+    for i in indexes:
+        x, y, w, h = boxes[i]
+        detected_vehicles.append((x, y, w, h, distances[i]))
+    
     return detected_vehicles, img, width, height
 
 # Intersection over Union (IoU) function
@@ -79,7 +77,7 @@ def iou(box1, box2):
     return inter_area / union_area if union_area != 0 else 0
 
 # Detect potential cut-ins and calculate speed and TTC
-def detect_potential_cut_ins_and_ttc(frame1_vehicles, frame2_vehicles, width, height, time_interval, distance_threshold=3.5, iou_threshold=0.3):
+def detect_potential_cut_ins_and_ttc(frame1_vehicles, frame2_vehicles, width, height, time_interval, iou_threshold=0.45):
     potential_cut_ins = []
     ttc_vehicles = []
 
@@ -95,28 +93,51 @@ def detect_potential_cut_ins_and_ttc(frame1_vehicles, frame2_vehicles, width, he
         if best_iou < iou_threshold:
             # This is a new vehicle or a vehicle that has moved significantly
             x2, y2, w2, h2, dist2 = box2
-            if dist2 < distance_threshold:  # Check if the vehicle is within the distance threshold
-                distance_from_center = np.sqrt((x2 + w2/2 - width/2)**2 + (y2 + h2/2 - height)**2)
-                if x2 < width / 2 and distance_from_center < width / 2:  # Assuming cut-in from left
-                    speed = w2 / time_interval
-                    if speed > 0:
-                        ttc = distance_from_center / speed  # time to collision in seconds
-                        if ttc < 2:  # Dangerous if TTC is less than 2 seconds
-                            potential_cut_ins.append(box2)
-                            ttc_vehicles.append((box2, ttc))
+            distance_from_center = np.sqrt((x2 + w2/2 - width/2)*2 + (y2 + h2/2 - height)*2)
+            theta = 2 * math.atan((real_car_width / 2) / distance_from_center)
+            apparent_width = 2 * distance_from_center * math.tan(theta / 2)
+
+            pixels = round((apparent_width * actual_pixel) / real_car_width)
+            upper_left_x = 320 - round(pixels / 2)
+            upper_right_x = 320 + round(pixels / 2)
+            det_left_x = x2 
+            det_left_y = y2 + h2
+            det_right_x = x2 + w2
+            det_right_y = y2 + h2
+            region = Polygon([(130, 640), (440, 640), (upper_left_x, 340), (upper_right_x, 340)])
+
+            if region.contains(Point(det_left_x, det_left_y)) or region.contains(Point(det_right_x, det_right_y)):
+                ttc = distance_from_center / speed
+                if speed > 0:
+                    potential_cut_ins.append(box2)
+                    if ttc < 2 and best_iou < iou_threshold:
+                        ttc_vehicles.append((box2, ttc))
 
     return potential_cut_ins, ttc_vehicles
 
-# Paths to images
-frame_paths =  [
-    "images2/0001799.jpeg", "images2/0001800.jpeg", "images2/0001801.jpeg",
-    "images2/0001802.jpeg", "images2/0001824.jpeg", "images2/0001825.jpeg",
-    "images2/0001826.jpeg", "images2/0001827.jpeg", "images2/0001828.jpeg",
-    "images2/0001829.jpeg"
-]
+def select_folder():
+    # Create a Tkinter root window
+    root = tk.Tk()
+    root.withdraw()  # Hide the root window
 
-# Time interval between consecutive frames (in seconds)
-time_interval = 0.1  # Example value, adjust as needed
+    # Open the folder selection dialog
+    folder_path = filedialog.askdirectory()
+
+    image_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff']
+    
+    # Initialize an empty list to store image file paths
+    image_file_paths = []
+
+    # Loop through each image extension and find all matching files
+    for extension in image_extensions:
+        image_file_paths.extend(glob.glob(os.path.join(folder_path, f'*{extension}')))
+
+    return image_file_paths
+
+# Get the list of image file paths
+frame_paths = select_folder()
+
+time_interval = 0  # Example value, adjust as needed
 
 # Process all frames
 for i in range(len(frame_paths) - 1):
@@ -129,30 +150,50 @@ for i in range(len(frame_paths) - 1):
 
     # Detect potential cut-ins and calculate TTC between the two frames
     potential_cut_ins, ttc_vehicles = detect_potential_cut_ins_and_ttc(frame1_vehicles, frame2_vehicles, width, height, time_interval)
-
+    
     # Draw bounding boxes and calculate distances
     for (x, y, w, h, distance) in frame2_vehicles:
-        color = (0, 255, 0)  # Green color for bounding box
-        if distance < 3.5:
-            color = (0, 0, 255)  # Red color if distance is less than 3.5 meters
+        time = distance / speed  # Time calculation
+        bottom_left_x = x
+        bottom_left_y = y + h
+        color = (0, 255, 0)  # Green color for bounding box by default
 
+        corners = [
+            Point(x, y),
+            Point(x + w, y),
+            Point(x, y + h),
+            Point(x + w, y + h)
+        ]
+        
+        distance_from_center = np.sqrt((x + w/2 - width/2)*2 + (y + h/2 - height)*2)
+        theta = 2 * math.atan((real_car_width / 2) / distance_from_center)
+        apparent_width = 2 * distance_from_center * math.tan(theta / 2)
+        pixels = round((apparent_width * actual_pixel) / real_car_width)
+        upper_left_x = 320 - round(pixels / 2)
+        upper_right_x = 320 + round(pixels / 2)
+            
+        checkpoint = Point(bottom_left_x, bottom_left_y)
+        region = Polygon([(200, 640), (620, 640), (upper_left_x, 340), (upper_right_x, 340)])
+
+        # Polygon region for checking
+        
+        # Check if any corner is within the polygon region and if time < 3 seconds
+        if any(region.contains(corner) for corner in corners) and time < 1.7:
+            color = (0, 0, 255)  # Red color if within the polygon region and time < 3 seconds
+        
         # Draw bounding box
-        cv2.rectangle(frame2_img, (x, y), (x + w, y + h), color, 2)
-        cv2.putText(frame2_img, f'Dist: {distance:.2f}m', (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-
+        cv2.rectangle(frame2_img, (int(x), int(y)), (int(x + w), int(y + h)), color, 2)
+        cv2.putText(frame2_img, f'Dist: {distance:.2f}m Time: {time:.2f}s', (int(bottom_left_x), int(bottom_left_y + 20)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)  # Distance and Time
+    
     # Draw TTC for cut-in vehicles
     for ((x, y, w, h, distance), ttc) in ttc_vehicles:
-        color = (0, 0, 255)  # Red color for TTC
-        cv2.putText(frame2_img, f'TTC: {ttc:.2f}s', (x, y + h + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-        cv2.putText(frame2_img, f'Dist: {distance:.2f}m', (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+        bottom_left_x = x
+        bottom_left_y = y + h
+        color = (0, 0, 255)  # Red color if within the polygon region
+        cv2.rectangle(frame2_img, (int(x), int(y)), (int(x + w), int(y + h)), color, 2)
+        cv2.putText(frame2_img, f'Dist: {distance:.2f}m TTC: {ttc:.2f}s', (int(bottom_left_x), int(bottom_left_y + 40)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
-    # Add the time to the image
-    current_time = time_interval * (i + 1)
-    cv2.putText(frame2_img, f'Time: {current_time:.1f}s', (10, height - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
-
-    # Display the result using matplotlib
-    plt.figure(figsize=(10, 10))
-    plt.imshow(cv2.cvtColor(frame2_img, cv2.COLOR_BGR2RGB))
-    plt.axis('off')
-    plt.title(f'Frame {i+2}')
-    plt.show()
+    # Display the output image with bounding boxes, distances, and TTC
+    cv2.imshow(f'Frame {i+2}', frame2_img)
+    cv2.waitKey(1000)  # Waitkey
+    cv2.destroyWindow(f'Frame {i+2}')  # Close
