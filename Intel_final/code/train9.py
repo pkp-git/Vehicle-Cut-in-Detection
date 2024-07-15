@@ -13,7 +13,7 @@ global apparent_width
 global speed
 global actual_pixel
 
-model = YOLO("yolov8n.pt")
+model = YOLO("yolov8s.pt")
 
 speed = 4  # m/s
 focal_length = 500  # Example value, replace with actual focal length
