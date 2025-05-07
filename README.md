@@ -10,7 +10,7 @@ Below are some explainatory images:
 
 ![WhatsApp Image 2024-07-15 at 00 49 59_57e05c7d](https://github.com/user-attachments/assets/a72bd68f-c29d-430d-8d81-8ece83f62b4b)
 
-The Blue line is the apparent width of the car if it was at that distance, while the Red line is the actual width of the car. the yellow lines connect these two and act as a boundary. In the above image, the car is only skimming the boundary.
+The Blue line is the apparent width of the car in front if it was at that distance, while the Red line is the actual width of the car. the yellow lines connect these two and act as a boundary. In the above image, the car is only skimming the boundary.
 
 ![w2](https://github.com/user-attachments/assets/47ded64c-7ac0-4d5e-bd7b-de6ee8faac63)
 
